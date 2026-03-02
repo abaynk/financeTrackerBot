@@ -13,6 +13,16 @@ import gspread
 from google.oauth2.service_account import Credentials
 import requests
 
+import json
+
+def get_credentials():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    raw = os.environ.get("GOOGLE_CREDENTIALS")
+    if raw:
+        info = json.loads(raw)
+        return Credentials.from_service_account_info(info, scopes=scopes)
+    return Credentials.from_service_account_file("credentials.json", scopes=scopes)
+
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8168748545:AAFEDlPWsN9j_-9iGvhbzrFjV5T5eTRjjDc")
 EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY", "b6ede9248d619da184f4d560")
@@ -39,7 +49,7 @@ logger = logging.getLogger(__name__)
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
 def get_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+    creds = get_credentials()
     client = gspread.authorize(creds)
     sh = client.open_by_key(SPREADSHEET_ID)
     try:
@@ -51,7 +61,7 @@ def get_sheet():
 
 def get_categories_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+    creds = get_credentials()
     client = gspread.authorize(creds)
     sh = client.open_by_key(SPREADSHEET_ID)
     try:
