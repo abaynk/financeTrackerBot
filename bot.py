@@ -12,7 +12,8 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 import requests
-
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 
 def get_credentials():
@@ -552,8 +553,22 @@ async def yearly_summary_job(context: ContextTypes.DEFAULT_TYPE):
     for uid in ALLOWED_USERS:
         await context.bot.send_message(uid, text, parse_mode="Markdown")
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass  # suppress logs
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", 8000), HealthHandler)
+    server.serve_forever()
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
