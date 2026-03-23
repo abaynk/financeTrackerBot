@@ -18,18 +18,18 @@ from google.oauth2.service_account import Credentials
 import requests
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
-EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY", "YOUR_EXCHANGE_API_KEY")
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8168748545:AAFED1PWsN9j_—9¡GvhbzrFjV5T5eTRjjDC")
+EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY", "b6ede9248d619da184f4d560")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1jC7H3yj-MIEJ7r97gRfrLorhHaWGt_raUmZGjUn65Go")
 ALLOWED_USERS = [365300344, 508703203]
-USER_NAMES = {365300344: "Абай", 508703203: "Жена"}
+USER_NAMES = {365300344: "Абай", 508703203: "Жанэля"}
 ASTANA_TZ = pytz.timezone("Asia/Almaty")
 
 CATEGORIES = [
     "продукты", "аптека", "такси", "бензин", "еда", "кофе",
     "развлечения", "ребенок", "гости", "подарки", "одежда",
     "путешествия", "подписки", "ком услуги", "интернет",
-    "связь", "косметика и уход", "штрафы"
+    "связь", "косметика и уход", "штрафы", "садака", "аренда", "машина", "дом"
 ]
 CURRENCIES = ["KZT", "USD", "EUR", "RUB"]
 
@@ -227,7 +227,7 @@ def main_menu_keyboard():
         ["📊 Анализ", "📋 Категории"],
         ["✏️ Редактировать", "🗑 Удалить"],
         ["📤 Экспорт", "❓ Помощь"]
-    ], resize_keyboard=True, persistent=True)
+    ], resize_keyboard=True, is_persistent=True)
 
 def categories_inline(cats):
     buttons, row = [], []
