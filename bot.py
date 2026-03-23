@@ -1,8 +1,12 @@
 import logging
 import os
-from datetime import datetime, time
+import json
+import threading
+import time
+from datetime import datetime, time as dtime
 import pytz
 import calendar
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -12,28 +16,13 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 import requests
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
-
-def get_credentials():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    raw = os.environ.get("GOOGLE_CREDENTIALS")
-    if raw:
-        info = json.loads(raw)
-        return Credentials.from_service_account_info(info, scopes=scopes)
-    return Credentials.from_service_account_file("credentials.json", scopes=scopes)
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8168748545:AAFEDlPWsN9j_-9iGvhbzrFjV5T5eTRjjDc")
-EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY", "b6ede9248d619da184f4d560")
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1jC7H3yj-MIEJ7r97gRfrLorhHaWGt_raUmZGjUn65Go")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
+EXCHANGE_API_KEY = os.environ.get("EXCHANGE_API_KEY", "YOUR_EXCHANGE_API_KEY")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID")
 ALLOWED_USERS = [365300344, 508703203]
-
-USER_NAMES = {
-    365300344: "Абай",
-    508703203: "Жанэля"
-}
+USER_NAMES = {365300344: "Абай", 508703203: "Жена"}
 ASTANA_TZ = pytz.timezone("Asia/Almaty")
 
 CATEGORIES = [
@@ -47,9 +36,37 @@ CURRENCIES = ["KZT", "USD", "EUR", "RUB"]
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── HEALTH SERVER ────────────────────────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", 8000), HealthHandler)
+    server.serve_forever()
+
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
-def get_sheet():
+def get_credentials():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    raw = os.environ.get("GOOGLE_CREDENTIALS")
+    if raw:
+        info = json.loads(raw)
+        return Credentials.from_service_account_info(info, scopes=scopes)
+    return Credentials.from_service_account_file("credentials.json", scopes=scopes)
+
+def get_sheet():
     creds = get_credentials()
     client = gspread.authorize(creds)
     sh = client.open_by_key(SPREADSHEET_ID)
@@ -61,7 +78,6 @@ def get_sheet():
     return ws
 
 def get_categories_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = get_credentials()
     client = gspread.authorize(creds)
     sh = client.open_by_key(SPREADSHEET_ID)
@@ -72,6 +88,28 @@ def get_categories_sheet():
         ws.append_row(["category"])
         for cat in CATEGORIES:
             ws.append_row([cat])
+    return ws
+
+def get_limits_sheet():
+    creds = get_credentials()
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SPREADSHEET_ID)
+    try:
+        ws = sh.worksheet("limits")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="limits", rows=100, cols=2)
+        ws.append_row(["category", "amount"])
+    return ws
+
+def get_notifications_sheet():
+    creds = get_credentials()
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SPREADSHEET_ID)
+    try:
+        ws = sh.worksheet("notifications")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="notifications", rows=1000, cols=4)
+        ws.append_row(["month", "category", "type", "sent"])
     return ws
 
 def load_categories():
@@ -95,31 +133,28 @@ def save_expense(user_id, amount_orig, currency, amount_kzt, category, note):
 def get_all_expenses():
     ws = get_sheet()
     return ws.get_all_records()
-    
-def get_limits_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = get_credentials()
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(SPREADSHEET_ID)
-    try:
-        ws = sh.worksheet("limits")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="limits", rows=100, cols=2)
-        ws.append_row(["category", "amount"])
-    return ws
 
-def get_notifications_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = get_credentials()
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(SPREADSHEET_ID)
-    try:
-        ws = sh.worksheet("notifications")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="notifications", rows=1000, cols=4)
-        ws.append_row(["month", "category", "type", "sent"])
-    return ws
+def delete_last_expense(user_id):
+    ws = get_sheet()
+    username = USER_NAMES.get(user_id, str(user_id))
+    all_values = ws.get_all_values()
+    for i in range(len(all_values) - 1, 0, -1):
+        if all_values[i][2] == username:
+            ws.delete_rows(i + 1)
+            return all_values[i]
+    return None
 
+def update_last_expense(user_id, field_index, new_value):
+    ws = get_sheet()
+    username = USER_NAMES.get(user_id, str(user_id))
+    all_values = ws.get_all_values()
+    for i in range(len(all_values) - 1, 0, -1):
+        if all_values[i][2] == username:
+            ws.update_cell(i + 1, field_index + 1, new_value)
+            return True
+    return False
+
+# ─── LIMITS ───────────────────────────────────────────────────────────────────
 def load_limits():
     ws = get_limits_sheet()
     records = ws.get_all_records()
@@ -149,7 +184,7 @@ def get_month_spending(category):
     records = get_all_expenses()
     return sum(
         r["amount_kzt"] for r in records
-        if r["category"] == category and r["date"][:7] == current_month
+        if r["category"] == category and str(r["date"])[:7] == current_month
     )
 
 def is_notified(month, category, notif_type):
@@ -157,39 +192,18 @@ def is_notified(month, category, notif_type):
     records = ws.get_all_records()
     return any(
         r["month"] == month and r["category"] == category
-        and str(r["type"]) == str(notif_type) and r["sent"] == "True"
+        and str(r["type"]) == str(notif_type) and str(r["sent"]) == "True"
         for r in records
     )
 
 def mark_notified(month, category, notif_type):
     ws = get_notifications_sheet()
-    ws.append_row([month, category, notif_type, "True"])
+    ws.append_row([month, category, str(notif_type), "True"])
 
 def build_progress_bar(pct):
-    filled = int(pct / 10)
+    filled = int(min(pct, 100) / 10)
     empty = 10 - filled
     return "▓" * filled + "░" * empty
-
-
-def delete_last_expense(user_id):
-    ws = get_sheet()
-    username = USER_NAMES.get(user_id, str(user_id))
-    all_values = ws.get_all_values()
-    for i in range(len(all_values) - 1, 0, -1):
-        if all_values[i][2] == username:
-            ws.delete_rows(i + 1)
-            return all_values[i]
-    return None
-
-def update_last_expense(user_id, field_index, new_value):
-    ws = get_sheet()
-    username = USER_NAMES.get(user_id, str(user_id))
-    all_values = ws.get_all_values()
-    for i in range(len(all_values) - 1, 0, -1):
-        if all_values[i][2] == username:
-            ws.update_cell(i + 1, field_index + 1, new_value)
-            return True
-    return False
 
 # ─── CURRENCY ─────────────────────────────────────────────────────────────────
 def convert_to_kzt(amount, currency):
@@ -213,7 +227,7 @@ def main_menu_keyboard():
         ["📊 Анализ", "📋 Категории"],
         ["✏️ Редактировать", "🗑 Удалить"],
         ["📤 Экспорт", "❓ Помощь"]
-    ], resize_keyboard=True, is_persistent=True)
+    ], resize_keyboard=True, persistent=True)
 
 def categories_inline(cats):
     buttons, row = [], []
@@ -324,7 +338,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 Категории — управление\n"
         "✏️ Редактировать — последняя запись\n"
         "🗑 Удалить — последняя запись\n"
-        "📤 Экспорт — ссылка на таблицу",
+        "📤 Экспорт — ссылка на таблицу\n\n"
+        "💰 *Лимиты:*\n"
+        "/setlimit кофе 25000 — установить лимит\n"
+        "/limits — все лимиты и прогресс\n"
+        "/dellimit кофе — удалить лимит",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
     )
@@ -351,13 +369,14 @@ async def quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ {category} — {amount:,.0f} ₸{note_str} ({USER_NAMES.get(user_id, '')})",
         reply_markup=main_menu_keyboard()
     )
+    await check_limit_notification(update, category)
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
     url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
     await update.message.reply_text(f"📊 [Открыть таблицу]({url})", parse_mode="Markdown")
-    
+
 async def setlimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -381,7 +400,7 @@ async def limits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     limits = load_limits()
     if not limits:
-        await update.message.reply_text("Лимиты не установлены. Используй /setlimit категория сумма")
+        await update.message.reply_text("Лимиты не установлены.\nИспользуй: /setlimit категория сумма")
         return
     now = datetime.now(ASTANA_TZ)
     month_name = now.strftime("%B %Y")
@@ -407,7 +426,6 @@ async def dellimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"Лимит для «{category}» не найден.")
 
-
 async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -420,25 +438,9 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_state(context)
     await update.message.reply_text("❌ Отменено.", reply_markup=main_menu_keyboard())
 
-# ─── FINISH ADD ───────────────────────────────────────────────────────────────
-async def _finish_add(update, context, note):
-    amount = context.user_data["amount"]
-    currency = context.user_data["currency"]
-    category = context.user_data["category"]
-    user_id = update.effective_user.id
-    amount_kzt = convert_to_kzt(amount, currency)
-    save_expense(user_id, amount, currency, amount_kzt, category, note)
-    conv = f" ({amount:,.0f} {currency} → {amount_kzt:,.0f} ₸)" if currency != "KZT" else f" {amount_kzt:,.0f} ₸"
-    note_str = f" — {note}" if note else ""
-    clear_state(context)
-        await update.message.reply_text(
-            f"✅ Сохранено!\n📂 {category}{conv}{note_str}\n👤 {USER_NAMES.get(user_id, '')}",
-            reply_markup=main_menu_keyboard()
-        )
-        # Check limits
-        await check_limit_notification(update, category)
-
-    async def check_limit_notification(update, category):
+# ─── LIMIT NOTIFICATION ───────────────────────────────────────────────────────
+async def check_limit_notification(update, category):
+    try:
         limits = load_limits()
         if category not in limits:
             return
@@ -449,7 +451,7 @@ async def _finish_add(update, context, note):
         month = now.strftime("%Y-%m")
         remaining = limit_amount - spent
         over = spent - limit_amount
-    
+
         if pct >= 100:
             if not is_notified(month, category, "100"):
                 mark_notified(month, category, "100")
@@ -471,7 +473,25 @@ async def _finish_add(update, context, note):
                     f"Потрачено: {spent:,.0f} ₸ из {limit_amount:,.0f} ₸\n"
                     f"Осталось: {remaining:,.0f} ₸"
                 )
+    except Exception as e:
+        logger.error(f"Limit check error: {e}")
 
+# ─── FINISH ADD ───────────────────────────────────────────────────────────────
+async def _finish_add(update, context, note):
+    amount = context.user_data["amount"]
+    currency = context.user_data["currency"]
+    category = context.user_data["category"]
+    user_id = update.effective_user.id
+    amount_kzt = convert_to_kzt(amount, currency)
+    save_expense(user_id, amount, currency, amount_kzt, category, note)
+    conv = f" ({amount:,.0f} {currency} → {amount_kzt:,.0f} ₸)" if currency != "KZT" else f" {amount_kzt:,.0f} ₸"
+    note_str = f" — {note}" if note else ""
+    clear_state(context)
+    await update.message.reply_text(
+        f"✅ Сохранено!\n📂 {category}{conv}{note_str}\n👤 {USER_NAMES.get(user_id, '')}",
+        reply_markup=main_menu_keyboard()
+    )
+    await check_limit_notification(update, category)
 
 # ─── TEXT MESSAGE HANDLER ─────────────────────────────────────────────────────
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -480,7 +500,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     state = get_state(context)
 
-    # Menu buttons
     if text == "➕ Добавить":
         clear_state(context)
         set_state(context, "add_amount")
@@ -514,7 +533,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_cmd(update, context)
         return
 
-    # State-based input
     if state == "add_amount":
         try:
             context.user_data["amount"] = float(text.replace(",", "."))
@@ -715,28 +733,11 @@ async def yearly_summary_job(context: ContextTypes.DEFAULT_TYPE):
     for uid in ALLOWED_USERS:
         await context.bot.send_message(uid, text, parse_mode="Markdown")
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", "2")
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-    def log_message(self, format, *args):
-        pass
-
-def run_health_server():
-    server = HTTPServer(("0.0.0.0", 8000), HealthHandler)
-    server.serve_forever()
-
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
-    
+    time.sleep(2)
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -745,18 +746,18 @@ def main():
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
-    app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CommandHandler("setlimit", setlimit_cmd))
     app.add_handler(CommandHandler("limits", limits_cmd))
     app.add_handler(CommandHandler("dellimit", dellimit_cmd))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     job_queue = app.job_queue
-    job_queue.run_daily(reminder_job,        time=time(18, 30, tzinfo=pytz.utc))  # 23:30 Astana
-    job_queue.run_daily(daily_summary_job,   time=time(18, 59, tzinfo=pytz.utc))  # 23:59 Astana
-    job_queue.run_daily(weekly_summary_job,  time=time(18, 59, tzinfo=pytz.utc))
-    job_queue.run_daily(monthly_summary_job, time=time(18, 59, tzinfo=pytz.utc))
-    job_queue.run_daily(yearly_summary_job,  time=time(18, 59, tzinfo=pytz.utc))
+    job_queue.run_daily(reminder_job,        dtime(18, 30, tzinfo=pytz.utc))
+    job_queue.run_daily(daily_summary_job,   dtime(18, 59, tzinfo=pytz.utc))
+    job_queue.run_daily(weekly_summary_job,  dtime(18, 59, tzinfo=pytz.utc))
+    job_queue.run_daily(monthly_summary_job, dtime(18, 59, tzinfo=pytz.utc))
+    job_queue.run_daily(yearly_summary_job,  dtime(18, 59, tzinfo=pytz.utc))
 
     logger.info("Bot started.")
     app.run_polling()
