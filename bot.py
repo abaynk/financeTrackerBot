@@ -95,6 +95,81 @@ def save_expense(user_id, amount_orig, currency, amount_kzt, category, note):
 def get_all_expenses():
     ws = get_sheet()
     return ws.get_all_records()
+    
+def get_limits_sheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = get_credentials()
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SPREADSHEET_ID)
+    try:
+        ws = sh.worksheet("limits")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="limits", rows=100, cols=2)
+        ws.append_row(["category", "amount"])
+    return ws
+
+def get_notifications_sheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = get_credentials()
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SPREADSHEET_ID)
+    try:
+        ws = sh.worksheet("notifications")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="notifications", rows=1000, cols=4)
+        ws.append_row(["month", "category", "type", "sent"])
+    return ws
+
+def load_limits():
+    ws = get_limits_sheet()
+    records = ws.get_all_records()
+    return {r["category"]: r["amount"] for r in records if r["category"]}
+
+def set_limit(category, amount):
+    ws = get_limits_sheet()
+    records = ws.get_all_records()
+    for i, r in enumerate(records, 2):
+        if r["category"] == category:
+            ws.update_cell(i, 2, amount)
+            return
+    ws.append_row([category, amount])
+
+def delete_limit(category):
+    ws = get_limits_sheet()
+    records = ws.get_all_records()
+    for i, r in enumerate(records, 2):
+        if r["category"] == category:
+            ws.delete_rows(i)
+            return True
+    return False
+
+def get_month_spending(category):
+    now = datetime.now(ASTANA_TZ)
+    current_month = now.strftime("%Y-%m")
+    records = get_all_expenses()
+    return sum(
+        r["amount_kzt"] for r in records
+        if r["category"] == category and r["date"][:7] == current_month
+    )
+
+def is_notified(month, category, notif_type):
+    ws = get_notifications_sheet()
+    records = ws.get_all_records()
+    return any(
+        r["month"] == month and r["category"] == category
+        and str(r["type"]) == str(notif_type) and r["sent"] == "True"
+        for r in records
+    )
+
+def mark_notified(month, category, notif_type):
+    ws = get_notifications_sheet()
+    ws.append_row([month, category, notif_type, "True"])
+
+def build_progress_bar(pct):
+    filled = int(pct / 10)
+    empty = 10 - filled
+    return "▓" * filled + "░" * empty
+
 
 def delete_last_expense(user_id):
     ws = get_sheet()
@@ -282,6 +357,56 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}"
     await update.message.reply_text(f"📊 [Открыть таблицу]({url})", parse_mode="Markdown")
+    
+async def setlimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Формат: /setlimit кофе 25000")
+        return
+    category = args[0].lower()
+    try:
+        amount = int(args[1].replace(",", "").replace(" ", ""))
+    except ValueError:
+        await update.message.reply_text("❌ Сумма должна быть числом.")
+        return
+    set_limit(category, amount)
+    await update.message.reply_text(
+        f"✅ Лимит для категории «{category}» установлен: {amount:,.0f} ₸/мес."
+    )
+
+async def limits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    limits = load_limits()
+    if not limits:
+        await update.message.reply_text("Лимиты не установлены. Используй /setlimit категория сумма")
+        return
+    now = datetime.now(ASTANA_TZ)
+    month_name = now.strftime("%B %Y")
+    lines = [f"📊 *Лимиты — {month_name}*\n"]
+    for category, limit_amount in limits.items():
+        spent = get_month_spending(category)
+        pct = min(int(spent / limit_amount * 100), 100) if limit_amount > 0 else 0
+        bar = build_progress_bar(pct)
+        status = "🔴 " if spent >= limit_amount else ("⚠️ " if pct >= 80 else "")
+        lines.append(f"{status}*{category}*: {spent:,.0f} / {limit_amount:,.0f} ₸ ({pct}%) {bar}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def dellimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Формат: /dellimit кофе")
+        return
+    category = args[0].lower()
+    if delete_limit(category):
+        await update.message.reply_text(f"🗑 Лимит для «{category}» удалён.")
+    else:
+        await update.message.reply_text(f"Лимит для «{category}» не найден.")
+
 
 async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
@@ -306,10 +431,47 @@ async def _finish_add(update, context, note):
     conv = f" ({amount:,.0f} {currency} → {amount_kzt:,.0f} ₸)" if currency != "KZT" else f" {amount_kzt:,.0f} ₸"
     note_str = f" — {note}" if note else ""
     clear_state(context)
-    await update.message.reply_text(
-        f"✅ Сохранено!\n📂 {category}{conv}{note_str}\n👤 {USER_NAMES.get(user_id, '')}",
-        reply_markup=main_menu_keyboard()
-    )
+        await update.message.reply_text(
+            f"✅ Сохранено!\n📂 {category}{conv}{note_str}\n👤 {USER_NAMES.get(user_id, '')}",
+            reply_markup=main_menu_keyboard()
+        )
+        # Check limits
+        await check_limit_notification(update, category)
+
+    async def check_limit_notification(update, category):
+        limits = load_limits()
+        if category not in limits:
+            return
+        limit_amount = limits[category]
+        spent = get_month_spending(category)
+        pct = spent / limit_amount * 100 if limit_amount > 0 else 0
+        now = datetime.now(ASTANA_TZ)
+        month = now.strftime("%Y-%m")
+        remaining = limit_amount - spent
+        over = spent - limit_amount
+    
+        if pct >= 100:
+            if not is_notified(month, category, "100"):
+                mark_notified(month, category, "100")
+                await update.message.reply_text(
+                    f"🔴 Лимит категории «{category}» исчерпан!\n"
+                    f"Потрачено: {spent:,.0f} ₸ из {limit_amount:,.0f} ₸\n"
+                    f"Превышение: {over:,.0f} ₸"
+                )
+            else:
+                await update.message.reply_text(
+                    f"🔴 Категория «{category}» превышена\n"
+                    f"Потрачено: {spent:,.0f} ₸ из {limit_amount:,.0f} ₸ (+{over:,.0f} ₸)"
+                )
+        elif pct >= 80:
+            if not is_notified(month, category, "80"):
+                mark_notified(month, category, "80")
+                await update.message.reply_text(
+                    f"⚠️ Лимит категории «{category}» использован на {pct:.0f}%\n"
+                    f"Потрачено: {spent:,.0f} ₸ из {limit_amount:,.0f} ₸\n"
+                    f"Осталось: {remaining:,.0f} ₸"
+                )
+
 
 # ─── TEXT MESSAGE HANDLER ─────────────────────────────────────────────────────
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -585,6 +747,9 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(CommandHandler("setlimit", setlimit_cmd))
+    app.add_handler(CommandHandler("limits", limits_cmd))
+    app.add_handler(CommandHandler("dellimit", dellimit_cmd))
 
     job_queue = app.job_queue
     job_queue.run_daily(reminder_job,        time=time(18, 30, tzinfo=pytz.utc))  # 23:30 Astana
